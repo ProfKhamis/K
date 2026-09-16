@@ -172,6 +172,7 @@ let aiO1U8CurrentStake = 0;
 let aiO1U8SessionPL = 0;
 let aiO1U8ActiveContractId = null;
 let aiO1U8PurchasePending = false; // true from the moment a buy is sent until the receipt (or error) comes back - stops a second entry firing on the next tick before the first trade is confirmed open
+let aiO1U8LastTradeSide = null; // 'OVER1' or 'UNDER8' - remembers the last side traded so the decision engine doesn't whipsaw on a near-tie
 
 // DOM Bindings - Strategy 5 (Pattern-Triggered Over/Under)
 const btnToggleAutoPOU = document.getElementById('btn-toggle-auto-pou');
@@ -1500,6 +1501,19 @@ btnRunRSIBot.addEventListener('click', () => {
 // 8/9 for Under 8) are currently below the safety threshold over the lookback window, or
 // waits if neither qualifies. This paces entries around recent digit distribution - it does
 // NOT change the true odds of the next digit, since each tick draws independently.
+//
+// Three refinements over a flat window-percentage check:
+//   1. Recency weighting - the most recent ticks count more than older ones (exponential
+//      decay), so the danger score reacts faster to a cluster of danger digits than a flat
+//      average over the whole window would.
+//   2. Fresh-hit guard - won't enter a side the instant its danger digit just landed as the
+//      very last tick, even if the window average still technically qualifies. That's the
+//      single riskiest moment to enter that side.
+//   3. Hysteresis - if both sides qualify and are close together, it sticks with whichever
+//      side it traded last instead of switching every single trade on a marginal difference.
+const AI_O1U8_DECAY = 0.92;      // recency weighting: 1.0 = newest tick, decays going back
+const AI_O1U8_SWITCH_MARGIN = 5; // percentage points the other side must be safer by to justify switching sides
+
 function evaluateAIO1U8Entry() {
     if (!isAIO1U8Running || aiO1U8ActiveContractId || aiO1U8PurchasePending) return;
 
@@ -1510,34 +1524,68 @@ function evaluateAIO1U8Entry() {
     }
 
     const threshold = parseFloat(aiO1U8ThresholdInput.value) || 15;
-    const overDangerCount = aiO1U8DigitWindow.filter(d => d === 0 || d === 1).length;
-    const underDangerCount = aiO1U8DigitWindow.filter(d => d === 8 || d === 9).length;
-    const overDangerPct = (overDangerCount / aiO1U8DigitWindow.length) * 100;
-    const underDangerPct = (underDangerCount / aiO1U8DigitWindow.length) * 100;
+    const n = aiO1U8DigitWindow.length;
+
+    // Weighted danger score: newest tick has weight 1, each tick further back is discounted
+    // by AI_O1U8_DECAY, so a recent cluster of danger digits pushes the score up faster than
+    // it would fade out an old one sitting at the far edge of the window.
+    let overWeightedSum = 0, underWeightedSum = 0, weightTotal = 0;
+    for (let i = 0; i < n; i++) {
+        const digit = aiO1U8DigitWindow[i];
+        const weight = Math.pow(AI_O1U8_DECAY, n - 1 - i);
+        weightTotal += weight;
+        if (digit === 0 || digit === 1) overWeightedSum += weight;
+        if (digit === 8 || digit === 9) underWeightedSum += weight;
+    }
+    const overDangerPct = (overWeightedSum / weightTotal) * 100;
+    const underDangerPct = (underWeightedSum / weightTotal) * 100;
 
     if (aiO1U8OverDangerDisplay) aiO1U8OverDangerDisplay.textContent = `${overDangerPct.toFixed(1)}%`;
     if (aiO1U8UnderDangerDisplay) aiO1U8UnderDangerDisplay.textContent = `${underDangerPct.toFixed(1)}%`;
 
-    const overQualifies = overDangerPct <= threshold;
-    const underQualifies = underDangerPct <= threshold;
+    const lastDigit = aiO1U8DigitWindow[n - 1];
+    const overFreshHit = lastDigit === 0 || lastDigit === 1;
+    const underFreshHit = lastDigit === 8 || lastDigit === 9;
+
+    const overQualifies = overDangerPct <= threshold && !overFreshHit;
+    const underQualifies = underDangerPct <= threshold && !underFreshHit;
 
     let decision = null;
+    let reason = '';
     if (overQualifies && underQualifies) {
-        decision = overDangerPct <= underDangerPct ? 'OVER1' : 'UNDER8';
+        // Both sides look safe - stick with the last side traded unless the other side is
+        // clearly safer, so the bot isn't ping-ponging between Over 1 and Under 8 on noise.
+        if (aiO1U8LastTradeSide === 'OVER1' && (overDangerPct - underDangerPct) < AI_O1U8_SWITCH_MARGIN) {
+            decision = 'OVER1';
+            reason = `staying on Over 1 (${overDangerPct.toFixed(1)}%) - Under 8 not safer by ${AI_O1U8_SWITCH_MARGIN}pt+ margin`;
+        } else if (aiO1U8LastTradeSide === 'UNDER8' && (underDangerPct - overDangerPct) < AI_O1U8_SWITCH_MARGIN) {
+            decision = 'UNDER8';
+            reason = `staying on Under 8 (${underDangerPct.toFixed(1)}%) - Over 1 not safer by ${AI_O1U8_SWITCH_MARGIN}pt+ margin`;
+        } else {
+            decision = overDangerPct <= underDangerPct ? 'OVER1' : 'UNDER8';
+            reason = `${decision === 'OVER1' ? 'Over 1' : 'Under 8'} danger score lower (${Math.min(overDangerPct, underDangerPct).toFixed(1)}% vs ${Math.max(overDangerPct, underDangerPct).toFixed(1)}%)`;
+        }
     } else if (overQualifies) {
         decision = 'OVER1';
+        reason = `Over 1 danger ${overDangerPct.toFixed(1)}% \u2264 ${threshold}%, last tick wasn't a fresh hit`;
     } else if (underQualifies) {
         decision = 'UNDER8';
+        reason = `Under 8 danger ${underDangerPct.toFixed(1)}% \u2264 ${threshold}%, last tick wasn't a fresh hit`;
     }
 
     if (decision === 'OVER1') {
-        logToConsole(`[AI Over 1/Under 8] Over 1 danger ${overDangerPct.toFixed(1)}% \u2264 ${threshold}% \u2014 buying Over 1.`, "success-msg");
+        logToConsole(`[AI Over 1/Under 8] ${reason} \u2014 buying Over 1.`, "success-msg");
+        aiO1U8LastTradeSide = 'OVER1';
         buyAIO1U8Contract('DIGITOVER', '1');
     } else if (decision === 'UNDER8') {
-        logToConsole(`[AI Over 1/Under 8] Under 8 danger ${underDangerPct.toFixed(1)}% \u2264 ${threshold}% \u2014 buying Under 8.`, "success-msg");
+        logToConsole(`[AI Over 1/Under 8] ${reason} \u2014 buying Under 8.`, "success-msg");
+        aiO1U8LastTradeSide = 'UNDER8';
         buyAIO1U8Contract('DIGITUNDER', '8');
     } else if (aiO1U8StatusText) {
-        aiO1U8StatusText.textContent = 'Waiting...';
+        const waitReason = (overFreshHit || underFreshHit) && (overDangerPct <= threshold || underDangerPct <= threshold)
+            ? 'Waiting (fresh hit)...'
+            : 'Waiting...';
+        aiO1U8StatusText.textContent = waitReason;
         aiO1U8StatusText.className = 'system-msg';
     }
 }
@@ -1629,6 +1677,7 @@ function stopAIO1U8(reason) {
     }
     aiO1U8ActiveContractId = null;
     aiO1U8PurchasePending = false;
+    aiO1U8LastTradeSide = null;
 
     logToConsole(`[AI Over 1/Under 8] Stopped.${reason ? ' Reason: ' + reason : ''}`, "system-msg");
 }
@@ -1648,6 +1697,7 @@ btnRunAIO1U8.addEventListener('click', () => {
     aiO1U8SessionPL = 0;
     aiO1U8PurchasePending = false;
     aiO1U8ActiveContractId = null;
+    aiO1U8LastTradeSide = null;
     aiO1U8CurrentStake = parseFloat(aiO1U8InitialStakeInput.value) || 5;
     btnRunAIO1U8.textContent = "Stop";
     btnRunAIO1U8.classList.add('stream-active');
