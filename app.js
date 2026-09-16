@@ -171,6 +171,7 @@ let aiO1U8DigitWindow = [];
 let aiO1U8CurrentStake = 0;
 let aiO1U8SessionPL = 0;
 let aiO1U8ActiveContractId = null;
+let aiO1U8PurchasePending = false; // true from the moment a buy is sent until the receipt (or error) comes back - stops a second entry firing on the next tick before the first trade is confirmed open
 
 // DOM Bindings - Strategy 5 (Pattern-Triggered Over/Under)
 const btnToggleAutoPOU = document.getElementById('btn-toggle-auto-pou');
@@ -828,6 +829,13 @@ optionsWebSocket.onmessage = (event) => {
             } else {
                 stopEdgeRotation(`Stopped - buy failed: ${incoming.error.message}`);
             }
+        }
+        if (incoming.echo_req?.passthrough?.bulkRunId?.startsWith("AIO1U8_")) {
+            // The buy never opened a contract, so release the pending flag or the bot would
+            // sit frozen forever thinking a trade is still in flight.
+            aiO1U8PurchasePending = false;
+            if (aiO1U8StatusText) { aiO1U8StatusText.textContent = 'Waiting...'; aiO1U8StatusText.className = 'system-msg'; }
+            logToConsole(`[AI Over 1/Under 8] Buy failed (${incoming.error.message}) - ready for next signal.`, "error-msg");
         }
         return;
     }
@@ -1493,7 +1501,7 @@ btnRunRSIBot.addEventListener('click', () => {
 // waits if neither qualifies. This paces entries around recent digit distribution - it does
 // NOT change the true odds of the next digit, since each tick draws independently.
 function evaluateAIO1U8Entry() {
-    if (!isAIO1U8Running || aiO1U8ActiveContractId) return;
+    if (!isAIO1U8Running || aiO1U8ActiveContractId || aiO1U8PurchasePending) return;
 
     const windowSize = parseInt(aiO1U8WindowInput.value, 10) || 20;
     if (aiO1U8DigitWindow.length < windowSize) {
@@ -1550,6 +1558,12 @@ function buyAIO1U8Contract(contractType, barrier) {
     const duration = parseInt(aiO1U8DurationInput.value, 10) || 1;
     const currency = currencyText.textContent || "USD";
     const runToken = "AIO1U8_" + Date.now();
+
+    // Mark a purchase as in-flight the instant we send it (not when the receipt comes back).
+    // The buy is async, so without this a tick that arrives before Deriv's reply passes the
+    // "no active contract yet" guard in evaluateAIO1U8Entry() and fires a second, simultaneous
+    // trade - this flag closes that gap, matching DBot's "wait for the first trade to finish" behavior.
+    aiO1U8PurchasePending = true;
 
     optionsWebSocket.send(JSON.stringify({
         "buy": 1,
@@ -1614,6 +1628,7 @@ function stopAIO1U8(reason) {
         logToConsole(`[AI Over 1/Under 8] Force-selling open contract ${aiO1U8ActiveContractId}.`, "system-msg");
     }
     aiO1U8ActiveContractId = null;
+    aiO1U8PurchasePending = false;
 
     logToConsole(`[AI Over 1/Under 8] Stopped.${reason ? ' Reason: ' + reason : ''}`, "system-msg");
 }
@@ -1631,6 +1646,8 @@ btnRunAIO1U8.addEventListener('click', () => {
     isAIO1U8Running = true;
     aiO1U8DigitWindow = [];
     aiO1U8SessionPL = 0;
+    aiO1U8PurchasePending = false;
+    aiO1U8ActiveContractId = null;
     aiO1U8CurrentStake = parseFloat(aiO1U8InitialStakeInput.value) || 5;
     btnRunAIO1U8.textContent = "Stop";
     btnRunAIO1U8.classList.add('stream-active');
@@ -1737,6 +1754,7 @@ function handlePurchaseReceipt(buyReceipt, passthrough) {
     }
     if (passthrough && passthrough.bulkRunId && passthrough.bulkRunId.startsWith("AIO1U8_")) {
         aiO1U8ActiveContractId = buyReceipt.contract_id;
+        aiO1U8PurchasePending = false;
     }
 
     if (buyReceipt.balance_after) {
