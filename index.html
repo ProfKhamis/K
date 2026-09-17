@@ -170,6 +170,7 @@
             <button class="tab-btn" data-target="tab-accumulator">Accumulator</button>
             <button class="tab-btn" data-target="tab-rsi-bot">AI Only Ups/Downs</button>
             <button class="tab-btn" data-target="tab-ai-o1u8">AI Over 1/Under 8</button>
+            <button class="tab-btn" data-target="tab-ai-o2u7">AI Over 2/Under 7</button>
         </div>
 
         <div class="focus-bar" id="focus-bar" style="display: none;">
@@ -759,6 +760,57 @@
                 <span>Stake: <strong id="ai-o1u8-current-stake">--</strong></span>
                 <span>P/L: <strong id="ai-o1u8-pl">--</strong></span>
                 <span>Decision: <strong id="ai-o1u8-status-text" class="system-msg">Idle</strong></span>
+            </div>
+        </section>
+
+        <!-- STRATEGY 11: AI Over 2/Under 7 - DBot-style 3-digit pattern trigger, fires on the tick after the pattern completes -->
+        <section class="card tab-content" id="tab-ai-o2u7">
+            <h3>AI Over 2/Under 7</h3>
+            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 8px;">
+                DBot-style pattern trigger, not a rolling-window average like AI Over 1/Under 8 above. It watches the
+                last 3 digits: for <strong>Over 2</strong> it arms when two "lower" digits (0, 1, or 2 &mdash; 2 counts
+                as lower since Over 2 loses on a tie) are immediately followed by one "upper" digit (3&ndash;9); for
+                <strong>Under 7</strong> it arms when two "upper" digits (7, 8, or 9 &mdash; 7 counts as upper since
+                Under 7 loses on a tie) are immediately followed by one confirming lower digit that is <em>not</em> 0
+                or 1 (so 2&ndash;6). Once armed it fires on whichever tick lands next &mdash; no re-checking, exactly
+                like the Auto Over/Under DBot strategy. <strong>Honest caveat:</strong> each tick's digit is drawn
+                independently, so this pattern doesn't change the odds of the next digit &mdash; it's a fixed entry
+                rule, not a prediction. Martingale staking and its own take-profit/stop-loss work the same way as the
+                other AI bots above.
+            </p>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Initial Stake:</label>
+                    <input type="number" id="ai-o2u7-initial-stake" value="5" min="0.50" step="0.50">
+                </div>
+                <div class="form-group">
+                    <label>Duration (Ticks):</label>
+                    <input type="number" id="ai-o2u7-duration" value="1" min="1" max="10">
+                </div>
+                <div class="form-group">
+                    <label>Martingale Multiplier:</label>
+                    <input type="number" id="ai-o2u7-martingale" value="1.3" min="1" step="0.1">
+                </div>
+            </div>
+            <div class="form-row" style="margin-top: 10px;">
+                <div class="form-group">
+                    <label>Take Profit ($):</label>
+                    <input type="number" id="ai-o2u7-take-profit" value="50" min="0" step="1">
+                </div>
+                <div class="form-group">
+                    <label>Stop Loss ($):</label>
+                    <input type="number" id="ai-o2u7-stop-loss" value="1000" min="0" step="1">
+                </div>
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 14px;">
+                <button id="btn-run-ai-o2u7" class="btn-primary" style="background-color: var(--accent-green); flex: 1;"
+                    disabled>Run</button>
+            </div>
+            <div class="balance-display" id="ai-o2u7-status" style="display: none; padding: 10px 12px; font-size: 0.85rem; justify-content: space-between; margin-top: 10px; flex-wrap: wrap; gap: 6px;">
+                <span>Last 3 Digits: <strong id="ai-o2u7-digit-history">--</strong></span>
+                <span>Stake: <strong id="ai-o2u7-current-stake">--</strong></span>
+                <span>P/L: <strong id="ai-o2u7-pl">--</strong></span>
+                <span>Status: <strong id="ai-o2u7-status-text" class="system-msg">Idle</strong></span>
             </div>
         </section>
 
