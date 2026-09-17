@@ -174,6 +174,48 @@ let aiO1U8ActiveContractId = null;
 let aiO1U8PurchasePending = false; // true from the moment a buy is sent until the receipt (or error) comes back - stops a second entry firing on the next tick before the first trade is confirmed open
 let aiO1U8LastTradeSide = null; // 'OVER1' or 'UNDER8' - remembers the last side traded so the decision engine doesn't whipsaw on a near-tie
 
+// DOM Bindings - AI Over 2/Under 7 (DBot-style 3-digit pattern trigger)
+const btnRunAIO2U7 = document.getElementById('btn-run-ai-o2u7');
+const aiO2U7InitialStakeInput = document.getElementById('ai-o2u7-initial-stake');
+const aiO2U7DurationInput = document.getElementById('ai-o2u7-duration');
+const aiO2U7MartingaleInput = document.getElementById('ai-o2u7-martingale');
+const aiO2U7TakeProfitInput = document.getElementById('ai-o2u7-take-profit');
+const aiO2U7StopLossInput = document.getElementById('ai-o2u7-stop-loss');
+const aiO2U7StatusPanel = document.getElementById('ai-o2u7-status');
+const aiO2U7DigitHistoryDisplay = document.getElementById('ai-o2u7-digit-history');
+const aiO2U7CurrentStakeDisplay = document.getElementById('ai-o2u7-current-stake');
+const aiO2U7PLDisplay = document.getElementById('ai-o2u7-pl');
+const aiO2U7StatusText = document.getElementById('ai-o2u7-status-text');
+
+const AI_O2U7_INPUT_IDS = [
+    'ai-o2u7-initial-stake', 'ai-o2u7-duration', 'ai-o2u7-martingale', 'ai-o2u7-take-profit', 'ai-o2u7-stop-loss'
+];
+
+let isAIO2U7Running = false;
+let aiO2U7DigitHistory = [];    // rolling last 3 ticks, used only to detect the entry pattern
+let aiO2U7Armed = false;        // true from the instant the pattern completes until the trade fires on the next tick
+let aiO2U7ArmedSide = null;     // 'OVER2' or 'UNDER7' - which side matched
+let aiO2U7CurrentStake = 0;
+let aiO2U7SessionPL = 0;
+let aiO2U7ActiveContractId = null;
+let aiO2U7PurchasePending = false; // true from the moment a buy is sent until the receipt (or error) comes back
+
+// Over 2 loses on 0, 1, or 2 (2 counts as a loss since DIGITOVER needs strictly greater than the barrier).
+// Under 7 loses on 7, 8, or 9 (7 counts as a loss since DIGITUNDER needs strictly less than the barrier).
+// The Under 7 confirm digit deliberately excludes 0 and 1, per the requested pattern.
+function matchAIO2U7Pattern(history) {
+    if (!history || history.length < 3) return null;
+    const [d1, d2, d3] = history;
+    const isOverDanger = d => d === 0 || d === 1 || d === 2;
+    const isOverConfirm = d => d >= 3 && d <= 9;
+    const isUnderDanger = d => d === 7 || d === 8 || d === 9;
+    const isUnderConfirm = d => d >= 2 && d <= 6;
+
+    if (isOverDanger(d1) && isOverDanger(d2) && isOverConfirm(d3)) return 'OVER2';
+    if (isUnderDanger(d1) && isUnderDanger(d2) && isUnderConfirm(d3)) return 'UNDER7';
+    return null;
+}
+
 // DOM Bindings - Strategy 5 (Pattern-Triggered Over/Under)
 const btnToggleAutoPOU = document.getElementById('btn-toggle-auto-pou');
 const tradeStakePOU = document.getElementById('trade-stake-pou');
@@ -473,6 +515,7 @@ function haltAllAutoModes() {
     if (isAccuRunning) stopRunAccu("Session target hit.");
     if (isRSIBotRunning) stopRSIBot("Session target hit.");
     if (isAIO1U8Running) stopAIO1U8("Session target hit.");
+    if (isAIO2U7Running) stopAIO2U7("Session target hit.");
     if (isEdgeRotationActive) stopEdgeRotation("Stopped - session TP/SL hit.");
     logToConsole("[Risk Management] All auto-trading modes halted.", "error-msg");
 }
@@ -838,6 +881,11 @@ optionsWebSocket.onmessage = (event) => {
             if (aiO1U8StatusText) { aiO1U8StatusText.textContent = 'Waiting...'; aiO1U8StatusText.className = 'system-msg'; }
             logToConsole(`[AI Over 1/Under 8] Buy failed (${incoming.error.message}) - ready for next signal.`, "error-msg");
         }
+        if (incoming.echo_req?.passthrough?.bulkRunId?.startsWith("AIO2U7_")) {
+            aiO2U7PurchasePending = false;
+            if (aiO2U7StatusText) { aiO2U7StatusText.textContent = 'Watching for pattern...'; aiO2U7StatusText.className = 'system-msg'; }
+            logToConsole(`[AI Over 2/Under 7] Buy failed (${incoming.error.message}) - watching for the next pattern.`, "error-msg");
+        }
         return;
     }
     if (incoming.msg_type === "topup_virtual") {
@@ -923,6 +971,12 @@ function handleIncomingTickPacket(tickData) {
         const o1u8WindowSize = parseInt(aiO1U8WindowInput.value, 10) || 20;
         aiO1U8DigitWindow.push(lastDigit);
         if (aiO1U8DigitWindow.length > o1u8WindowSize) aiO1U8DigitWindow.shift();
+    }
+
+    if (isAIO2U7Running) {
+        aiO2U7DigitHistory.push(lastDigit);
+        if (aiO2U7DigitHistory.length > 3) aiO2U7DigitHistory.shift();
+        if (aiO2U7DigitHistoryDisplay) aiO2U7DigitHistoryDisplay.textContent = aiO2U7DigitHistory.join(' ') || '--';
     }
 
     let patternFired = false;
@@ -1021,6 +1075,26 @@ function handleIncomingTickPacket(tickData) {
         if (isDBotOURunning && dbotOuArmed) {
             dbotOuArmed = false;
             fireDBotOUPair();
+        }
+
+        // AI Over 2/Under 7: DBot-style pattern trigger. The "fire when armed" check runs
+        // BEFORE pattern detection below so a pattern completing on tick N arms the bot, and
+        // it fires strictly on tick N+1 - never on the same tick it just armed on.
+        if (isAIO2U7Running && aiO2U7Armed) {
+            aiO2U7Armed = false;
+            const armedSide = aiO2U7ArmedSide;
+            aiO2U7ArmedSide = null;
+            fireAIO2U7Trade(armedSide);
+        } else if (isAIO2U7Running && !aiO2U7ActiveContractId && !aiO2U7PurchasePending) {
+            const match = matchAIO2U7Pattern(aiO2U7DigitHistory);
+            if (match) {
+                aiO2U7Armed = true;
+                aiO2U7ArmedSide = match;
+                aiO2U7DigitHistory = [];
+                const label = match === 'OVER2' ? 'Over 2' : 'Under 7';
+                logToConsole(`[AI Over 2/Under 7] Pattern matched \u2014 armed for ${label}, firing on the next tick.`, "success-msg");
+                if (aiO2U7StatusText) { aiO2U7StatusText.textContent = `Armed (${label}) \u2014 firing next tick`; aiO2U7StatusText.className = 'success-msg'; }
+            }
         }
 
         // Over 0 / Under 9 pattern trigger: wait for the target digit to land twice in a row
@@ -1711,6 +1785,134 @@ btnRunAIO1U8.addEventListener('click', () => {
     logToConsole(`[AI Over 1/Under 8] Running. Safety threshold ${aiO1U8ThresholdInput.value}% over a ${aiO1U8WindowInput.value}-digit window.`, "success-msg");
 });
 
+function fireAIO2U7Trade(side) {
+    if (isSessionLocked()) {
+        logToConsole("[Session] Trading is locked until the next session opens.", "error-msg");
+        stopAIO2U7("Session target hit.");
+        return;
+    }
+    if (!optionsWebSocket || optionsWebSocket.readyState !== WebSocket.OPEN) {
+        logToConsole("Error: Real-time stream must be connected before running trades.", "error-msg");
+        stopAIO2U7("Stream disconnected.");
+        return;
+    }
+
+    const contractType = side === 'OVER2' ? 'DIGITOVER' : 'DIGITUNDER';
+    const barrier = side === 'OVER2' ? '2' : '7';
+    const label = side === 'OVER2' ? 'Over 2' : 'Under 7';
+
+    const symbol = marketDropdown.value;
+    const duration = parseInt(aiO2U7DurationInput.value, 10) || 1;
+    const currency = currencyText.textContent || "USD";
+    const runToken = "AIO2U7_" + Date.now();
+
+    // Same async gap fix as AI Over 1/Under 8: mark pending the instant the buy is sent, not
+    // when the receipt arrives, so a tick in that gap can't re-arm and fire a second trade.
+    aiO2U7PurchasePending = true;
+
+    optionsWebSocket.send(JSON.stringify({
+        "buy": 1,
+        "price": aiO2U7CurrentStake,
+        "subscribe": 1,
+        "parameters": {
+            "amount": aiO2U7CurrentStake,
+            "basis": "stake",
+            "contract_type": contractType,
+            "currency": currency,
+            "duration": duration,
+            "duration_unit": "t",
+            "underlying_symbol": symbol,
+            "barrier": barrier
+        },
+        "passthrough": { "bulkRunId": runToken }
+    }));
+
+    if (aiO2U7StatusText) { aiO2U7StatusText.textContent = `Trade Open (${label})`; aiO2U7StatusText.className = 'system-msg'; }
+    logToConsole(`[${runToken}] Pattern fired \u2014 bought ${label} at stake ${aiO2U7CurrentStake.toFixed(2)}.`, "success-msg");
+}
+
+function handleAIO2U7Settled(profitValue) {
+    aiO2U7SessionPL += profitValue;
+    if (aiO2U7PLDisplay) {
+        aiO2U7PLDisplay.textContent = `${aiO2U7SessionPL >= 0 ? '+' : ''}${aiO2U7SessionPL.toFixed(2)}`;
+        aiO2U7PLDisplay.className = aiO2U7SessionPL >= 0 ? 'success-msg' : 'error-msg';
+    }
+
+    const martingale = parseFloat(aiO2U7MartingaleInput.value) || 1.3;
+    const initialStake = parseFloat(aiO2U7InitialStakeInput.value) || 5;
+    if (profitValue >= 0) {
+        aiO2U7CurrentStake = initialStake;
+    } else {
+        aiO2U7CurrentStake = aiO2U7CurrentStake * martingale;
+    }
+    if (aiO2U7CurrentStakeDisplay) aiO2U7CurrentStakeDisplay.textContent = aiO2U7CurrentStake.toFixed(2);
+
+    const takeProfit = parseFloat(aiO2U7TakeProfitInput.value) || 0;
+    const stopLoss = parseFloat(aiO2U7StopLossInput.value) || 0;
+    if (takeProfit > 0 && aiO2U7SessionPL >= takeProfit) {
+        stopAIO2U7(`Take-profit hit (+${aiO2U7SessionPL.toFixed(2)}).`);
+        return;
+    }
+    if (stopLoss > 0 && aiO2U7SessionPL <= -stopLoss) {
+        stopAIO2U7(`Stop-loss hit (${aiO2U7SessionPL.toFixed(2)}).`);
+        return;
+    }
+
+    if (isAIO2U7Running && aiO2U7StatusText) {
+        aiO2U7StatusText.textContent = 'Watching for pattern...';
+        aiO2U7StatusText.className = 'system-msg';
+    }
+}
+
+function stopAIO2U7(reason) {
+    isAIO2U7Running = false;
+    btnRunAIO2U7.textContent = "Run";
+    btnRunAIO2U7.classList.remove('stream-active');
+    AI_O2U7_INPUT_IDS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+    if (aiO2U7StatusPanel) aiO2U7StatusPanel.style.display = 'none';
+
+    if (aiO2U7ActiveContractId && optionsWebSocket && optionsWebSocket.readyState === WebSocket.OPEN) {
+        optionsWebSocket.send(JSON.stringify({ "sell": aiO2U7ActiveContractId, "price": 0 }));
+        logToConsole(`[AI Over 2/Under 7] Force-selling open contract ${aiO2U7ActiveContractId}.`, "system-msg");
+    }
+    aiO2U7ActiveContractId = null;
+    aiO2U7PurchasePending = false;
+    aiO2U7Armed = false;
+    aiO2U7ArmedSide = null;
+    aiO2U7DigitHistory = [];
+
+    logToConsole(`[AI Over 2/Under 7] Stopped.${reason ? ' Reason: ' + reason : ''}`, "system-msg");
+}
+
+btnRunAIO2U7.addEventListener('click', () => {
+    if (isAIO2U7Running) {
+        stopAIO2U7("Manual stop.");
+        return;
+    }
+    if (isSessionLocked()) {
+        logToConsole("[Session] Trading is locked until the next session opens.", "error-msg");
+        return;
+    }
+
+    isAIO2U7Running = true;
+    aiO2U7DigitHistory = [];
+    aiO2U7Armed = false;
+    aiO2U7ArmedSide = null;
+    aiO2U7SessionPL = 0;
+    aiO2U7PurchasePending = false;
+    aiO2U7ActiveContractId = null;
+    aiO2U7CurrentStake = parseFloat(aiO2U7InitialStakeInput.value) || 5;
+    btnRunAIO2U7.textContent = "Stop";
+    btnRunAIO2U7.classList.add('stream-active');
+    AI_O2U7_INPUT_IDS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+    if (aiO2U7StatusPanel) aiO2U7StatusPanel.style.display = 'flex';
+    if (aiO2U7CurrentStakeDisplay) aiO2U7CurrentStakeDisplay.textContent = aiO2U7CurrentStake.toFixed(2);
+    if (aiO2U7PLDisplay) { aiO2U7PLDisplay.textContent = '0.00'; aiO2U7PLDisplay.className = 'system-msg'; }
+    if (aiO2U7DigitHistoryDisplay) aiO2U7DigitHistoryDisplay.textContent = '--';
+    if (aiO2U7StatusText) { aiO2U7StatusText.textContent = 'Watching for pattern...'; aiO2U7StatusText.className = 'system-msg'; }
+    logToConsole(`[AI Over 2/Under 7] Running. Waiting for the 3-digit pattern (2 danger digits + 1 confirm) on either side.`, "success-msg");
+});
+
 function executePatternOverUnder(match) {
     if (isSessionLocked()) {
         logToConsole("[Session] Trading is locked until the next session opens.", "error-msg");
@@ -1805,6 +2007,10 @@ function handlePurchaseReceipt(buyReceipt, passthrough) {
     if (passthrough && passthrough.bulkRunId && passthrough.bulkRunId.startsWith("AIO1U8_")) {
         aiO1U8ActiveContractId = buyReceipt.contract_id;
         aiO1U8PurchasePending = false;
+    }
+    if (passthrough && passthrough.bulkRunId && passthrough.bulkRunId.startsWith("AIO2U7_")) {
+        aiO2U7ActiveContractId = buyReceipt.contract_id;
+        aiO2U7PurchasePending = false;
     }
 
     if (buyReceipt.balance_after) {
@@ -1918,6 +2124,12 @@ function handleContractUpdate(contract) {
             logToConsole(`[AI Over 1/Under 8] Contract settled (${contract.status}), profit ${profitValue.toFixed(2)}.`, "system-msg");
             if (isAIO1U8Running) handleAIO1U8Settled(profitValue);
         }
+        if (contract.contract_id === aiO2U7ActiveContractId) {
+            aiO2U7ActiveContractId = null;
+            const profitValue = parseFloat(contract.profit) || 0;
+            logToConsole(`[AI Over 2/Under 7] Contract settled (${contract.status}), profit ${profitValue.toFixed(2)}.`, "system-msg");
+            if (isAIO2U7Running) handleAIO2U7Settled(profitValue);
+        }
     }
 
     const row = document.getElementById(`contract-row-${contract.contract_id}`);
@@ -1933,15 +2145,28 @@ function handleContractUpdate(contract) {
         row.querySelector('.row-buy-price').textContent = `${parseFloat(contract.buy_price).toFixed(2)} ${currencySymbol}`;
     }
 
-    // Update Entry Spot visual text
-    if (contract.entry_spot) {
-        row.querySelector('.row-entry-price').textContent = parseFloat(contract.entry_spot).toFixed(2);
+    // Update Entry Spot visual text.
+    // Deriv synthetic indices don't all quote to 2 decimal places (some use 3 or 4), and the
+    // LAST digit of that quote - at its native precision - is what actually decides a
+    // DIGITOVER/DIGITUNDER contract's outcome. Forcing every symbol through toFixed(2) rounds
+    // to the wrong number of decimals for those markets, so the digit shown here could differ
+    // from the digit Deriv actually settled on. entry_spot_display_value / entry_tick_display_value
+    // are Deriv's own pre-formatted strings at the correct precision, so prefer those; only fall
+    // back to the raw number (unrounded) if a display value isn't present.
+    const entrySpotDisplay = contract.entry_tick_display_value ?? contract.entry_spot_display_value;
+    if (entrySpotDisplay !== undefined) {
+        row.querySelector('.row-entry-price').textContent = entrySpotDisplay;
+    } else if (contract.entry_spot) {
+        row.querySelector('.row-entry-price').textContent = contract.entry_spot;
     }
 
-    // Update Exit or Current Spot text in real-time
-    if (contract.exit_spot || contract.current_spot) {
-        const activeSpot = contract.exit_spot || contract.current_spot;
-        row.querySelector('.row-exit-digit').textContent = parseFloat(activeSpot).toFixed(2);
+    // Update Exit or Current Spot text in real-time - same precision fix as entry spot above,
+    // since this is the digit the trade actually won or lost on.
+    const exitSpotDisplay = contract.exit_tick_display_value ?? contract.exit_spot_display_value ?? contract.current_spot_display_value;
+    if (exitSpotDisplay !== undefined) {
+        row.querySelector('.row-exit-digit').textContent = exitSpotDisplay;
+    } else if (contract.exit_spot || contract.current_spot) {
+        row.querySelector('.row-exit-digit').textContent = contract.exit_spot ?? contract.current_spot;
     }
 
     // Update Profit/Loss visualization colors and strings
@@ -2401,7 +2626,8 @@ function updateTradeControlsState(isActive) {
     btnRunAccu.disabled = !isReady;
     btnRunRSIBot.disabled = !isReady;
     btnRunAIO1U8.disabled = !isReady;
-    if (!isReady) { toggleAutoEO(false); toggleAutoOU(false); toggleAutoPOU(false); if (isDBotOURunning) stopDBotOU("Stream disconnected."); if (isAccuRunning) stopRunAccu("Stream disconnected."); if (isRSIBotRunning) stopRSIBot("Stream disconnected."); if (isAIO1U8Running) stopAIO1U8("Stream disconnected."); if (isEdgeRotationActive) stopEdgeRotation("Stream disconnected."); if (isBulkOver2Armed) disarmBulkOver2(); }
+    btnRunAIO2U7.disabled = !isReady;
+    if (!isReady) { toggleAutoEO(false); toggleAutoOU(false); toggleAutoPOU(false); if (isDBotOURunning) stopDBotOU("Stream disconnected."); if (isAccuRunning) stopRunAccu("Stream disconnected."); if (isRSIBotRunning) stopRSIBot("Stream disconnected."); if (isAIO1U8Running) stopAIO1U8("Stream disconnected."); if (isAIO2U7Running) stopAIO2U7("Stream disconnected."); if (isEdgeRotationActive) stopEdgeRotation("Stream disconnected."); if (isBulkOver2Armed) disarmBulkOver2(); }
 }
 
 function disconnectExistingStream() {
