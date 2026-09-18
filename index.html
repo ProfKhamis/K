@@ -509,7 +509,10 @@
                 offset of 0.5 buys Higher at entry+0.5 and Lower at entry&minus;0.5 <em>at the same time</em>.
                 <strong>Honest caveat:</strong> the two barriers create a dead zone between them &mdash; if the exit
                 spot lands inside that zone, both legs lose. This doesn't change the underlying odds; it's a fixed
-                pair-entry rule, not a prediction.
+                pair-entry rule, not a prediction. <strong>Buy Pair Manually</strong> fires one batch on click.
+                <strong>Auto Higher/Lower (DBot)</strong> fires a pair, waits for both legs to settle, then fires
+                the next pair on the very next tick automatically &mdash; no fixed batch, no timer &mdash; exactly
+                like the Auto Over/Under (DBot) strategy, until you hit Stop or today's session take-profit is hit.
             </p>
             <div class="form-row">
                 <div class="form-group">
@@ -533,9 +536,26 @@
                         title="Higher barrier = entry + this offset, Lower barrier = entry - this offset">
                 </div>
             </div>
+            <div class="balance-display" id="hl-live-barrier" style="padding: 10px 12px; font-size: 0.85rem; justify-content: space-between; margin-top: 6px; flex-wrap: wrap; gap: 6px;">
+                <span>Live Spot: <strong id="hl-live-spot">--</strong></span>
+                <span>Higher Barrier: <strong id="hl-higher-barrier-price" style="color: var(--accent-green);">--</strong></span>
+                <span>Lower Barrier: <strong id="hl-lower-barrier-price" style="color: var(--accent-red);">--</strong></span>
+            </div>
+            <p style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 4px;">
+                Updates live from the tick stream, same as the barrier preview on Deriv's own trader. The barrier
+                actually sent with each trade is formatted to match this symbol's live decimal precision (its
+                "pip size") &mdash; a mismatch there is the most common cause of the <code>InvalidToBuy: Invalid
+                barrier</code> error.
+            </p>
             <div style="display: flex; gap: 10px; margin-top: 14px;">
                 <button id="btn-buy-hl" class="btn-primary" style="background-color: var(--accent-green); flex: 1;"
                     disabled>Buy Pair Manually</button>
+                <button id="btn-run-dbot-hl" class="btn-secondary" style="flex: 1;" disabled>Auto Higher/Lower
+                    (DBot)</button>
+            </div>
+            <div class="balance-display" id="dbot-hl-status" style="display: none; padding: 10px 12px; font-size: 0.85rem; justify-content: space-between; margin-top: 10px; flex-wrap: wrap; gap: 6px;">
+                <span>Cycles Fired: <strong id="dbot-hl-cycle-count">0</strong></span>
+                <span>Status: <strong id="dbot-hl-status-text" class="system-msg">Idle</strong></span>
             </div>
         </section>
 
