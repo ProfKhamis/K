@@ -80,6 +80,13 @@ const patternTriggerOUCheckbox = document.getElementById('pattern-trigger-ou');
 const ouPatternStatus = document.getElementById('ou-pattern-status');
 const ouPatternDigitHistoryDisplay = document.getElementById('ou-pattern-digit-history');
 const ouPatternLastMatchDisplay = document.getElementById('ou-pattern-last-match');
+
+// DOM Bindings - Strategy 2b (Bulk Higher/Lower - buys a Higher + Lower pair simultaneously)
+const btnBuyHL = document.getElementById('btn-buy-hl');
+const tradeStakeHL = document.getElementById('trade-stake-hl');
+const tradeDurationHL = document.getElementById('trade-duration-hl');
+const hlBarrierOffsetInput = document.getElementById('hl-barrier-offset');
+const maxTradesHLInput = document.getElementById('max-trades-hl');
 const loopUntilTargetOUCheckbox = document.getElementById('loop-until-target-ou');
 const ouLoopStatus = document.getElementById('ou-loop-status');
 const ouLoopCycleCountDisplay = document.getElementById('ou-loop-cycle-count');
@@ -1223,6 +1230,80 @@ function executeBulkOverUnderPair() {
     logToConsole(`[${bulkRunToken}] Fired ${batchSize} Over/Under pairs (${batchSize * 2} contracts) on this tick.`, "success-msg");
 }
 
+// Bulk Higher/Lower: same "fire a pair simultaneously, batched" pattern as executeBulkOverUnderPair
+// above, but for Deriv's Higher/Lower contract (contract_type CALL = Higher, PUT = Lower).
+// Per Deriv's docs (developers.deriv.com/docs/higherlower): Higher pays out if the exit spot is
+// strictly ABOVE its barrier, Lower pays out if the exit spot is strictly BELOW its barrier, and a
+// tie on either barrier loses that leg. Barriers under 24h duration must be relative (a +/- offset
+// from the entry spot, e.g. "+0.5"), so this uses one symmetric offset for both legs: Higher gets
+// "+offset", Lower gets "-offset". That leaves a dead zone between the two barriers where, if the
+// exit spot lands inside it, BOTH legs lose - this is an honest trade-off of buying both sides at
+// once, not a bug.
+function executeBulkHigherLowerPair() {
+    if (isSessionLocked()) {
+        logToConsole("[Session] Trading is locked until the next session opens.", "error-msg");
+        return;
+    }
+    if (!optionsWebSocket || optionsWebSocket.readyState !== WebSocket.OPEN) {
+        logToConsole("Error: Real-time stream must be connected before running trades.", "error-msg");
+        return;
+    }
+
+    const symbol = marketDropdown.value;
+    const stake = parseFloat(tradeStakeHL.value);
+    const duration = parseInt(tradeDurationHL.value, 10);
+    const currency = currencyText.textContent || "USD";
+
+    const offsetRaw = parseFloat(hlBarrierOffsetInput.value);
+    const offset = Math.abs(isNaN(offsetRaw) || offsetRaw <= 0 ? 0.5 : offsetRaw);
+    const higherBarrier = `+${offset}`;
+    const lowerBarrier = `-${offset}`;
+
+    const batchSize = parseInt(maxTradesHLInput.value, 10) || 1;
+    const bulkRunToken = "BULK_HL_" + Date.now();
+    challengeBatchExpectedCounts[bulkRunToken] = batchSize * 2;
+
+    for (let i = 0; i < batchSize; i++) {
+        optionsWebSocket.send(JSON.stringify({
+            "buy": 1,
+            "price": stake,
+            "subscribe": 1,
+            "parameters": {
+                "amount": stake,
+                "basis": "stake",
+                "contract_type": "CALL",
+                "currency": currency,
+                "duration": duration,
+                "duration_unit": "t",
+                "underlying_symbol": symbol,
+                "barrier": higherBarrier
+            },
+            "passthrough": { "bulkRunId": bulkRunToken }
+        }));
+
+        optionsWebSocket.send(JSON.stringify({
+            "buy": 1,
+            "price": stake,
+            "subscribe": 1,
+            "parameters": {
+                "amount": stake,
+                "basis": "stake",
+                "contract_type": "PUT",
+                "currency": currency,
+                "duration": duration,
+                "duration_unit": "t",
+                "underlying_symbol": symbol,
+                "barrier": lowerBarrier
+            },
+            "passthrough": { "bulkRunId": bulkRunToken }
+        }));
+    }
+
+    logToConsole(`[${bulkRunToken}] Fired ${batchSize} Higher(${higherBarrier})/Lower(${lowerBarrier}) pairs (${batchSize * 2} contracts) on this tick.`, "success-msg");
+}
+
+btnBuyHL.addEventListener('click', executeBulkHigherLowerPair);
+
 // Fires exactly one Over + one Under contract for the DBot-style loop. Unlike the bulk
 // strategies, this never batches and never waits on a guessed timer - the tick handler
 // arms this to fire on the very next tick, and handleContractUpdate re-arms it the
@@ -2019,8 +2100,8 @@ function handlePurchaseReceipt(buyReceipt, passthrough) {
 
     if (emptyRow) emptyRow.remove();
 
-    const isOver = buyReceipt.shortcode.includes("DIGITOVER") || buyReceipt.shortcode.includes("RUNHIGH");
-    const isUnder = buyReceipt.shortcode.includes("DIGITUNDER") || buyReceipt.shortcode.includes("RUNLOW");
+    const isOver = buyReceipt.shortcode.includes("DIGITOVER") || buyReceipt.shortcode.includes("RUNHIGH") || buyReceipt.shortcode.startsWith("CALL_");
+    const isUnder = buyReceipt.shortcode.includes("DIGITUNDER") || buyReceipt.shortcode.includes("RUNLOW") || buyReceipt.shortcode.startsWith("PUT_");
     const directionArrow = isOver 
         ? `<span style="color: var(--accent-green); font-weight: bold; font-size: 1.1rem;">↗</span>` 
         : isUnder
@@ -2619,6 +2700,7 @@ function updateTradeControlsState(isActive) {
     btnBuyEO.disabled = !isReady;
     btnToggleAutoEO.disabled = !isReady;
     btnBuyOU.disabled = !isReady;
+    btnBuyHL.disabled = !isReady;
     btnToggleAutoOU.disabled = !isReady;
     btnToggleAutoPOU.disabled = !isReady;
     btnBuyBulkOver2.disabled = !isReady;
