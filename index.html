@@ -162,6 +162,7 @@
         <div class="tabs-navigation" id="section-strategies">
             <button class="tab-btn active" data-target="tab-even-odd">Digit Even/Odd</button>
             <button class="tab-btn" data-target="tab-bulk-ou">Bulk Over/Under</button>
+            <button class="tab-btn" data-target="tab-bulk-hl">Higher/Lower</button>
             <button class="tab-btn" data-target="tab-digit-stats">Digit Stats</button>
             <button class="tab-btn" data-target="tab-bulk-eo">Over 0 / Under 9</button>
             <button class="tab-btn" data-target="tab-bulk-tn">Differs</button>
@@ -493,6 +494,48 @@
                 <div style="font-size: 0.8rem; color: var(--text-secondary); margin-left: 10px; white-space: nowrap;">
                     Triggers: <strong id="over2-run-progress">0 / 0</strong>
                 </div>
+            </div>
+        </section>
+
+        <!-- STRATEGY 2b: Bulk Higher/Lower - buys a Higher + Lower pair simultaneously, same pattern as Bulk Over/Under -->
+        <section class="card tab-content" id="tab-bulk-hl">
+            <h3>Higher/Lower</h3>
+            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 8px;">
+                Fires a Higher + Lower pair on the same tick, repeated back-to-back the number of times set below
+                &mdash; same batching pattern as Bulk Over/Under. Per Deriv's Higher/Lower contract: <strong>Higher</strong>
+                (contract type CALL) pays out if the exit spot is strictly above its barrier; <strong>Lower</strong>
+                (contract type PUT) pays out if the exit spot is strictly below its barrier. A tie on either barrier
+                loses that leg. Barrier Offset sets both barriers symmetrically around the entry spot &mdash; e.g. an
+                offset of 0.5 buys Higher at entry+0.5 and Lower at entry&minus;0.5 <em>at the same time</em>.
+                <strong>Honest caveat:</strong> the two barriers create a dead zone between them &mdash; if the exit
+                spot lands inside that zone, both legs lose. This doesn't change the underlying odds; it's a fixed
+                pair-entry rule, not a prediction.
+            </p>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Stake (Per Trade):</label>
+                    <input type="number" id="trade-stake-hl" value="5.00" min="0.50" step="0.50">
+                </div>
+                <div class="form-group">
+                    <label>Duration (Ticks):</label>
+                    <input type="number" id="trade-duration-hl" value="5" min="1" max="10">
+                </div>
+                <div class="form-group">
+                    <label>Pairs Per Tick (Max Trades Cap):</label>
+                    <input type="number" id="max-trades-hl" value="1" min="1" max="100"
+                        title="How many Higher/Lower pairs to fire on the same tick each time it buys (e.g. 10 = 10 Higher + 10 Lower = 20 contracts at once)">
+                </div>
+            </div>
+            <div class="form-row" style="margin-top: 10px;">
+                <div class="form-group">
+                    <label>Barrier Offset (from entry spot):</label>
+                    <input type="number" id="hl-barrier-offset" value="0.5" min="0.01" step="0.01"
+                        title="Higher barrier = entry + this offset, Lower barrier = entry - this offset">
+                </div>
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 14px;">
+                <button id="btn-buy-hl" class="btn-primary" style="background-color: var(--accent-green); flex: 1;"
+                    disabled>Buy Pair Manually</button>
             </div>
         </section>
 
