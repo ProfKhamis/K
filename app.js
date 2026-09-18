@@ -15,6 +15,22 @@ let dbotOuBatchOpenCount = 0;
 let isDBotOURunning = false;
 let dbotOuArmed = false;
 let dbotOuCycleCount = 0;
+const dbotHLActiveContractIds = new Set();
+let dbotHLBatchOpenCount = 0;
+let isDBotHLRunning = false;
+let dbotHLArmed = false;
+let dbotHLCycleCount = 0;
+let lastTickQuoteString = null; // raw quote text of the most recent tick, used to derive the live symbol's decimal precision ("pip size") for Higher/Lower barriers
+
+// Returns how many decimal places the given quote string uses (its "pip size"). Barriers for
+// Higher/Lower must be formatted to this same precision - Deriv's own examples always show the
+// barrier's decimal count matching the underlying's quoted precision, and a mismatch there is a
+// well-documented cause of the "InvalidToBuy: Invalid barrier" error.
+function getPipDecimals(quoteStr) {
+    if (!quoteStr) return 2;
+    const parts = quoteStr.toString().split('.');
+    return parts.length > 1 ? parts[1].length : 0;
+}
 let isAutoTradingEO = false;
 let isAutoTradingOU = false;
 let autoBulkCooldown = false; 
@@ -87,6 +103,15 @@ const tradeStakeHL = document.getElementById('trade-stake-hl');
 const tradeDurationHL = document.getElementById('trade-duration-hl');
 const hlBarrierOffsetInput = document.getElementById('hl-barrier-offset');
 const maxTradesHLInput = document.getElementById('max-trades-hl');
+const hlLiveSpotDisplay = document.getElementById('hl-live-spot');
+const hlHigherBarrierDisplay = document.getElementById('hl-higher-barrier-price');
+const hlLowerBarrierDisplay = document.getElementById('hl-lower-barrier-price');
+
+// DOM Bindings - Auto Higher/Lower (DBot style) - same pair, fires again the instant it settles
+const btnRunDBotHL = document.getElementById('btn-run-dbot-hl');
+const dbotHLStatusPanel = document.getElementById('dbot-hl-status');
+const dbotHLCycleCountDisplay = document.getElementById('dbot-hl-cycle-count');
+const dbotHLStatusText = document.getElementById('dbot-hl-status-text');
 const loopUntilTargetOUCheckbox = document.getElementById('loop-until-target-ou');
 const ouLoopStatus = document.getElementById('ou-loop-status');
 const ouLoopCycleCountDisplay = document.getElementById('ou-loop-cycle-count');
@@ -519,6 +544,7 @@ function haltAllAutoModes() {
     if (isBulkOver2Armed) disarmBulkOver2();
     if (isAutoModeTN) toggleAutoTN(false);
     if (isDBotOURunning) stopDBotOU("Session target hit.");
+    if (isDBotHLRunning) stopDBotHL("Session target hit.");
     if (isAccuRunning) stopRunAccu("Session target hit.");
     if (isRSIBotRunning) stopRSIBot("Session target hit.");
     if (isAIO1U8Running) stopAIO1U8("Session target hit.");
@@ -893,6 +919,22 @@ optionsWebSocket.onmessage = (event) => {
             if (aiO2U7StatusText) { aiO2U7StatusText.textContent = 'Watching for pattern...'; aiO2U7StatusText.className = 'system-msg'; }
             logToConsole(`[AI Over 2/Under 7] Buy failed (${incoming.error.message}) - watching for the next pattern.`, "error-msg");
         }
+        if (incoming.echo_req?.passthrough?.bulkRunId?.startsWith("DBOT_HL_")) {
+            // A leg failing to open (e.g. an invalid barrier) must still count toward both legs
+            // being accounted for, or the loop freezes forever waiting on a contract that never opened.
+            dbotHLBatchOpenCount = Math.max(0, dbotHLBatchOpenCount - 1);
+            if (isDBotHLRunning) {
+                logToConsole(`[Auto Higher/Lower DBot] A leg failed to open (${incoming.error.message}).`, "error-msg");
+                if (dbotHLBatchOpenCount === 0) {
+                    dbotHLCycleCount++;
+                    if (dbotHLCycleCountDisplay) dbotHLCycleCountDisplay.textContent = dbotHLCycleCount;
+                    if (dbotHLStatusText) { dbotHLStatusText.textContent = 'Waiting for next tick'; dbotHLStatusText.className = 'system-msg'; }
+                    dbotHLArmed = true;
+                }
+            } else {
+                stopDBotHL(`Stopped - buy failed: ${incoming.error.message}`);
+            }
+        }
         return;
     }
     if (incoming.msg_type === "topup_virtual") {
@@ -949,6 +991,7 @@ function handleIncomingTickPacket(tickData) {
     if (!tickData || !tickData.quote) return;
     const priceString = tickData.quote.toString();
     const lastDigit = parseInt(priceString.charAt(priceString.length - 1), 10);
+    lastTickQuoteString = priceString;
 
     recentDigitHistory.push(lastDigit);
     if (recentDigitHistory.length > 2) recentDigitHistory.shift();
@@ -1084,6 +1127,13 @@ function handleIncomingTickPacket(tickData) {
             fireDBotOUPair();
         }
 
+        // DBot-style Higher/Lower: same pattern as DBot Over/Under above, adapted for the
+        // CALL/PUT pair - fires the instant it's armed, re-armed once both legs settle.
+        if (isDBotHLRunning && dbotHLArmed) {
+            dbotHLArmed = false;
+            fireDBotHLPair();
+        }
+
         // AI Over 2/Under 7: DBot-style pattern trigger. The "fire when armed" check runs
         // BEFORE pattern detection below so a pattern completing on tick N arms the bot, and
         // it fires strictly on tick N+1 - never on the same tick it just armed on.
@@ -1120,6 +1170,18 @@ function handleIncomingTickPacket(tickData) {
     liveTickValue.textContent = priceString;
     liveDigitValue.textContent = lastDigit;
     updateDigitStatsPanel();
+
+    // Live Higher/Lower barrier preview - same idea as Deriv's own trader, which shows the
+    // actual barrier price (not just the offset) updating as ticks stream in.
+    if (hlHigherBarrierDisplay && hlLowerBarrierDisplay) {
+        const offsetRaw = parseFloat(hlBarrierOffsetInput.value);
+        const offset = Math.abs(isNaN(offsetRaw) || offsetRaw <= 0 ? 0.5 : offsetRaw);
+        const pipDecimals = getPipDecimals(priceString);
+        const spot = parseFloat(tickData.quote);
+        if (hlLiveSpotDisplay) hlLiveSpotDisplay.textContent = spot.toFixed(pipDecimals);
+        hlHigherBarrierDisplay.textContent = (spot + offset).toFixed(pipDecimals);
+        hlLowerBarrierDisplay.textContent = (spot - offset).toFixed(pipDecimals);
+    }
     if (patternDigitHistoryDisplay) {
         patternDigitHistoryDisplay.textContent = recentDigitHistory.join(' ') || '--';
     }
@@ -1256,8 +1318,14 @@ function executeBulkHigherLowerPair() {
 
     const offsetRaw = parseFloat(hlBarrierOffsetInput.value);
     const offset = Math.abs(isNaN(offsetRaw) || offsetRaw <= 0 ? 0.5 : offsetRaw);
-    const higherBarrier = `+${offset}`;
-    const lowerBarrier = `-${offset}`;
+    // Format the offset to the SAME number of decimal places as the live quote for this symbol
+    // (its pip size). Deriv's own client examples always show the barrier's decimal precision
+    // matching the underlying's quoted precision - sending a mismatched precision (e.g. "+0.5"
+    // on a symbol that quotes to 3 or 4 decimals) is a well-documented cause of the
+    // "InvalidToBuy: Invalid barrier" error.
+    const pipDecimals = getPipDecimals(lastTickQuoteString);
+    const higherBarrier = `+${offset.toFixed(pipDecimals)}`;
+    const lowerBarrier = `-${offset.toFixed(pipDecimals)}`;
 
     const batchSize = parseInt(maxTradesHLInput.value, 10) || 1;
     const bulkRunToken = "BULK_HL_" + Date.now();
@@ -1303,6 +1371,109 @@ function executeBulkHigherLowerPair() {
 }
 
 btnBuyHL.addEventListener('click', executeBulkHigherLowerPair);
+
+// Auto Higher/Lower (DBot style): same continuous "fire, wait for both legs to settle, fire the
+// next pair on the very next tick" loop as fireDBotOUPair, adapted for Higher/Lower. No fixed
+// batch, no timer-based delay - handleContractUpdate re-arms it the instant both legs settle.
+function fireDBotHLPair() {
+    if (isSessionLocked()) {
+        logToConsole("[Session] Trading is locked until the next session opens.", "error-msg");
+        stopDBotHL("Session target hit.");
+        return;
+    }
+    if (!optionsWebSocket || optionsWebSocket.readyState !== WebSocket.OPEN) {
+        logToConsole("Error: Real-time stream must be connected before running trades.", "error-msg");
+        stopDBotHL("Stream disconnected.");
+        return;
+    }
+
+    const symbol = marketDropdown.value;
+    const stake = parseFloat(tradeStakeHL.value);
+    const duration = parseInt(tradeDurationHL.value, 10);
+    const currency = currencyText.textContent || "USD";
+
+    const offsetRaw = parseFloat(hlBarrierOffsetInput.value);
+    const offset = Math.abs(isNaN(offsetRaw) || offsetRaw <= 0 ? 0.5 : offsetRaw);
+    const pipDecimals = getPipDecimals(lastTickQuoteString);
+    const higherBarrier = `+${offset.toFixed(pipDecimals)}`;
+    const lowerBarrier = `-${offset.toFixed(pipDecimals)}`;
+
+    const runToken = "DBOT_HL_" + Date.now();
+    dbotHLBatchOpenCount = 2;
+
+    optionsWebSocket.send(JSON.stringify({
+        "buy": 1,
+        "price": stake,
+        "subscribe": 1,
+        "parameters": {
+            "amount": stake,
+            "basis": "stake",
+            "contract_type": "CALL",
+            "currency": currency,
+            "duration": duration,
+            "duration_unit": "t",
+            "underlying_symbol": symbol,
+            "barrier": higherBarrier
+        },
+        "passthrough": { "bulkRunId": runToken }
+    }));
+
+    optionsWebSocket.send(JSON.stringify({
+        "buy": 1,
+        "price": stake,
+        "subscribe": 1,
+        "parameters": {
+            "amount": stake,
+            "basis": "stake",
+            "contract_type": "PUT",
+            "currency": currency,
+            "duration": duration,
+            "duration_unit": "t",
+            "underlying_symbol": symbol,
+            "barrier": lowerBarrier
+        },
+        "passthrough": { "bulkRunId": runToken }
+    }));
+
+    logToConsole(`[${runToken}] Fired Higher(${higherBarrier})/Lower(${lowerBarrier}) pair on this tick.`, "success-msg");
+    if (dbotHLStatusText) { dbotHLStatusText.textContent = 'Trade Open'; dbotHLStatusText.className = 'system-msg'; }
+}
+
+function stopDBotHL(reason) {
+    isDBotHLRunning = false;
+    dbotHLArmed = false;
+    btnRunDBotHL.textContent = "Run";
+    btnRunDBotHL.classList.remove('stream-active');
+    tradeStakeHL.disabled = false;
+    tradeDurationHL.disabled = false;
+    hlBarrierOffsetInput.disabled = false;
+    if (dbotHLStatusPanel) dbotHLStatusPanel.style.display = 'none';
+    logToConsole(`[Auto Higher/Lower DBot] Stopped.${reason ? ' Reason: ' + reason : ''}`, "system-msg");
+}
+
+btnRunDBotHL.addEventListener('click', () => {
+    if (isDBotHLRunning) {
+        stopDBotHL("Manual stop.");
+        return;
+    }
+    if (isSessionLocked()) {
+        logToConsole("[Session] Trading is locked until the next session opens.", "error-msg");
+        return;
+    }
+
+    isDBotHLRunning = true;
+    dbotHLArmed = true;
+    dbotHLCycleCount = 0;
+    btnRunDBotHL.textContent = "Stop";
+    btnRunDBotHL.classList.add('stream-active');
+    tradeStakeHL.disabled = true;
+    tradeDurationHL.disabled = true;
+    hlBarrierOffsetInput.disabled = true;
+    if (dbotHLStatusPanel) dbotHLStatusPanel.style.display = 'flex';
+    if (dbotHLCycleCountDisplay) dbotHLCycleCountDisplay.textContent = '0';
+    if (dbotHLStatusText) { dbotHLStatusText.textContent = 'Waiting for next tick'; dbotHLStatusText.className = 'system-msg'; }
+    logToConsole(`[Auto Higher/Lower DBot] Running. Barrier offset \u00b1${hlBarrierOffsetInput.value}, firing on the next tick, then looping until today's session target is hit.`, "success-msg");
+});
 
 // Fires exactly one Over + one Under contract for the DBot-style loop. Unlike the bulk
 // strategies, this never batches and never waits on a guessed timer - the tick handler
@@ -2079,6 +2250,9 @@ function handlePurchaseReceipt(buyReceipt, passthrough) {
     if (passthrough && passthrough.bulkRunId && passthrough.bulkRunId.startsWith("DBOT_OU_")) {
         dbotOuActiveContractIds.add(buyReceipt.contract_id);
     }
+    if (passthrough && passthrough.bulkRunId && passthrough.bulkRunId.startsWith("DBOT_HL_")) {
+        dbotHLActiveContractIds.add(buyReceipt.contract_id);
+    }
     if (passthrough && passthrough.bulkRunId && passthrough.bulkRunId.startsWith("ACCU_")) {
         accuActiveContractId = buyReceipt.contract_id;
     }
@@ -2181,6 +2355,18 @@ function handleContractUpdate(contract) {
                 if (dbotOuStatusText) { dbotOuStatusText.textContent = 'Waiting for next tick'; dbotOuStatusText.className = 'system-msg'; }
                 logToConsole(`[Auto Over/Under DBot] Cycle ${dbotOuCycleCount} settled. Armed for the next tick...`, "system-msg");
                 dbotOuArmed = true; // Fires the instant the next tick arrives - see handleIncomingTickPacket.
+            }
+        }
+        if (dbotHLActiveContractIds.has(contract.contract_id)) {
+            dbotHLActiveContractIds.delete(contract.contract_id);
+            dbotHLBatchOpenCount = Math.max(0, dbotHLBatchOpenCount - 1);
+
+            if (dbotHLBatchOpenCount === 0 && isDBotHLRunning) {
+                dbotHLCycleCount++;
+                if (dbotHLCycleCountDisplay) dbotHLCycleCountDisplay.textContent = dbotHLCycleCount;
+                if (dbotHLStatusText) { dbotHLStatusText.textContent = 'Waiting for next tick'; dbotHLStatusText.className = 'system-msg'; }
+                logToConsole(`[Auto Higher/Lower DBot] Cycle ${dbotHLCycleCount} settled. Armed for the next tick...`, "system-msg");
+                dbotHLArmed = true; // Fires the instant the next tick arrives - see handleIncomingTickPacket.
             }
         }
         if (contract.contract_id === accuActiveContractId) {
@@ -2701,6 +2887,7 @@ function updateTradeControlsState(isActive) {
     btnToggleAutoEO.disabled = !isReady;
     btnBuyOU.disabled = !isReady;
     btnBuyHL.disabled = !isReady;
+    btnRunDBotHL.disabled = !isReady;
     btnToggleAutoOU.disabled = !isReady;
     btnToggleAutoPOU.disabled = !isReady;
     btnBuyBulkOver2.disabled = !isReady;
@@ -2709,7 +2896,7 @@ function updateTradeControlsState(isActive) {
     btnRunRSIBot.disabled = !isReady;
     btnRunAIO1U8.disabled = !isReady;
     btnRunAIO2U7.disabled = !isReady;
-    if (!isReady) { toggleAutoEO(false); toggleAutoOU(false); toggleAutoPOU(false); if (isDBotOURunning) stopDBotOU("Stream disconnected."); if (isAccuRunning) stopRunAccu("Stream disconnected."); if (isRSIBotRunning) stopRSIBot("Stream disconnected."); if (isAIO1U8Running) stopAIO1U8("Stream disconnected."); if (isAIO2U7Running) stopAIO2U7("Stream disconnected."); if (isEdgeRotationActive) stopEdgeRotation("Stream disconnected."); if (isBulkOver2Armed) disarmBulkOver2(); }
+    if (!isReady) { toggleAutoEO(false); toggleAutoOU(false); toggleAutoPOU(false); if (isDBotOURunning) stopDBotOU("Stream disconnected."); if (isDBotHLRunning) stopDBotHL("Stream disconnected."); if (isAccuRunning) stopRunAccu("Stream disconnected."); if (isRSIBotRunning) stopRSIBot("Stream disconnected."); if (isAIO1U8Running) stopAIO1U8("Stream disconnected."); if (isAIO2U7Running) stopAIO2U7("Stream disconnected."); if (isEdgeRotationActive) stopEdgeRotation("Stream disconnected."); if (isBulkOver2Armed) disarmBulkOver2(); }
 }
 
 function disconnectExistingStream() {
